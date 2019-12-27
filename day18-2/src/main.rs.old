@@ -1,0 +1,389 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Read;
+
+struct PairTable<T> {
+    data: Vec<T>,
+}
+
+fn pair_index(a: u8, b: u8) -> usize {
+    let (big, small) = if a >= b { (a, b) } else { (b, a) };
+    (big as usize * big as usize + big as usize) / 2 + small as usize
+}
+
+impl<T: Clone> PairTable<T> {
+    fn new_clone(num_keys: usize, value: T) -> Self {
+        let num_data = (num_keys * num_keys + num_keys) / 2;
+        let mut data = Vec::with_capacity(num_data);
+        for _ in 0..num_data {
+            data.push(value.clone());
+        }
+        Self { data }
+    }
+}
+
+impl<T> PairTable<T> {
+    fn get(&self, a: u8, b: u8) -> &T {
+        &self.data[pair_index(a, b)]
+    }
+    fn get_mut(&mut self, a: u8, b: u8) -> &mut T {
+        &mut self.data[pair_index(a, b)]
+    }
+}
+
+fn for_each_subset_mask_rec<F: FnMut(u32)>(size: u8, offset: u8, width: u8, mask: u32, f: &mut F) {
+    if size == 0 {
+        f(mask);
+    } else {
+        for i in offset..width {
+            for_each_subset_mask_rec(size - 1, i + 1, width, mask | (1 << i), f);
+        }
+    }
+}
+
+fn for_each_subset_mask<F: FnMut(u32)>(size: u8, width: u8, mut f: F) {
+    for_each_subset_mask_rec(size, 0, width, 0, &mut f);
+}
+
+#[derive(Clone, Copy)]
+struct SubsetMaskIter {
+    mask: u32,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+struct SubsetMask {
+    mask: u32,
+}
+
+impl std::fmt::Debug for SubsetMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "{:?}", self.iter().collect::<Vec<_>>())
+    }
+}
+
+impl SubsetMask {
+    fn iter(self) -> SubsetMaskIter {
+        SubsetMaskIter { mask: self.mask }
+    }
+    fn insert(self, n: u8) -> Self {
+        assert!(n < 32);
+        Self {
+            mask: self.mask | (1 << n),
+        }
+    }
+    fn remove(self, n: u8) -> Self {
+        assert!(n < 32);
+        Self {
+            mask: self.mask & !(1 << n),
+        }
+    }
+    fn is_empty(self) -> bool {
+        self.mask == 0
+    }
+    fn is_subset_of(self, other: Self) -> bool {
+        self.mask & other.mask == self.mask
+    }
+}
+
+impl Iterator for SubsetMaskIter {
+    type Item = u8;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.mask == 0 {
+            None
+        } else {
+            let trailing_zeros = self.mask.trailing_zeros() as u8;
+            self.mask &= !(1 << trailing_zeros);
+            Some(trailing_zeros)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+struct Coord {
+    x: i32,
+    y: i32,
+}
+
+impl std::ops::Add for Coord {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
+    }
+}
+
+const UNIT_COORDS: [Coord; 4] = [
+    Coord { x: 0, y: 1 },
+    Coord { x: 0, y: -1 },
+    Coord { x: 1, y: 0 },
+    Coord { x: -1, y: 0 },
+];
+
+#[derive(Clone, Copy, Debug)]
+enum Cell {
+    Wall,
+    Floor,
+    Key(u8),
+    Gate(u8),
+    Start,
+}
+
+#[derive(Debug)]
+struct Grid {
+    cells: Vec<Cell>,
+    width: usize,
+    height: usize,
+    num_keys: u8,
+}
+
+impl Grid {
+    fn from_str(s: &str) -> Self {
+        let mut cells = Vec::new();
+        let mut height = 0;
+        let mut num_keys = 0;
+        for line in s.trim().lines() {
+            for c in line.chars() {
+                let cell = match c {
+                    '#' => Cell::Wall,
+                    '.' => Cell::Floor,
+                    'a'..='z' => {
+                        num_keys += 1;
+                        Cell::Key(c as u8 - 'a' as u8)
+                    }
+                    'A'..='Z' => Cell::Gate(c as u8 - 'A' as u8),
+                    '@' => Cell::Start,
+                    _ => panic!(),
+                };
+                cells.push(cell);
+            }
+            height += 1;
+        }
+        let width = s.len() / height - 1;
+        Self {
+            cells,
+            width,
+            height,
+            num_keys,
+        }
+    }
+    fn get(&self, coord: Coord) -> Option<Cell> {
+        if coord.x < 0
+            || coord.y < 0
+            || coord.x as usize >= self.width
+            || coord.y as usize >= self.height
+        {
+            return None;
+        }
+        let index = coord.x as usize + coord.y as usize * self.width;
+        Some(self.cells[index])
+    }
+    fn pair_table(&self) -> PairTable<Option<PairInfo>> {
+        let mut pair_table = PairTable::new_clone(self.num_keys as usize + 1, None);
+        for y in 0..self.height as i32 {
+            for x in 0..self.width as i32 {
+                let coord = Coord { x, y };
+                match self.get(coord).unwrap() {
+                    Cell::Floor | Cell::Wall | Cell::Gate(_) => (),
+                    Cell::Start => {
+                        add_pair_info(coord, self.num_keys, self.num_keys, self, &mut pair_table)
+                    }
+                    Cell::Key(id) => add_pair_info(coord, id, self.num_keys, self, &mut pair_table),
+                }
+            }
+        }
+        pair_table
+    }
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+struct PairInfo {
+    cost: usize,
+    gates: SubsetMask,
+}
+
+fn add_pair_info(
+    start_coord: Coord,
+    start_id: u8,
+    num_keys: u8,
+    grid: &Grid,
+    pair_table: &mut PairTable<Option<PairInfo>>,
+) {
+    let mut queue = VecDeque::new();
+    queue.push_front((start_coord, 0, SubsetMask::default()));
+    let mut seen = HashSet::new();
+    seen.insert(start_coord);
+    while let Some((coord, cost, gates)) = queue.pop_back() {
+        for &unit in &UNIT_COORDS {
+            let neighbour_coord = coord + unit;
+            if let Some(cell) = grid.get(neighbour_coord) {
+                if seen.contains(&neighbour_coord) {
+                    continue;
+                }
+                seen.insert(neighbour_coord);
+                let neighbour_cost = cost + 1;
+                let mut neighbour_gates = gates;
+                match cell {
+                    Cell::Wall => continue,
+                    Cell::Floor => (),
+                    Cell::Key(id) => {
+                        let pair_info = pair_table.get_mut(start_id, id);
+                        *pair_info = Some(PairInfo {
+                            cost: neighbour_cost,
+                            gates,
+                        });
+                    }
+                    Cell::Start => {
+                        let pair_info = pair_table.get_mut(start_id, num_keys);
+                        *pair_info = Some(PairInfo {
+                            cost: neighbour_cost,
+                            gates,
+                        });
+                    }
+                    Cell::Gate(id) => neighbour_gates = gates.insert(id),
+                }
+                queue.push_front((neighbour_coord, neighbour_cost, neighbour_gates));
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SubProblem {
+    subset_mask: SubsetMask,
+    end_id: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SubProblemValue {
+    cost: usize,
+    end_id_by_quadrant: [Option<u8>; 4],
+}
+
+#[derive(Debug)]
+struct QuadrantTable {
+    quadrants: Vec<u8>,
+}
+
+impl QuadrantTable {
+    fn new(num_keys: u8, pair_table: &PairTable<Option<PairInfo>>) -> Self {
+        let mut quadrants = vec![255; num_keys as usize];
+        let mut example = 0;
+        let mut next_example = 0;
+        for q_id in 0..4 {
+            for i in 0..num_keys {
+                if i == example || pair_table.get(example, i).is_some() {
+                    quadrants[i as usize] = q_id;
+                } else if quadrants[i as usize] == 255 {
+                    next_example = i;
+                }
+            }
+            example = next_example;
+        }
+        for &q in &quadrants {
+            assert_ne!(q, 255);
+        }
+        Self { quadrants }
+    }
+    fn get(&self, key: u8) -> u8 {
+        self.quadrants[key as usize]
+    }
+}
+
+fn run(num_keys: u8, pair_table: &PairTable<Option<PairInfo>>) {
+    let quadrant_table = QuadrantTable::new(num_keys, pair_table);
+    let mut cache = HashMap::new();
+    let max_subset_size = num_keys;
+    for subset_size in 1..=max_subset_size {
+        println!("..{}", subset_size);
+        for_each_subset_mask(subset_size, num_keys, |mask| {
+            let subset_mask = SubsetMask { mask };
+            for end_id in subset_mask.iter() {
+                let subset_mask_minus_end_id = subset_mask.remove(end_id);
+                let start_to_end_pair_info = pair_table.get(num_keys, end_id).unwrap();
+                if !start_to_end_pair_info
+                    .gates
+                    .is_subset_of(subset_mask_minus_end_id)
+                {
+                    // no way to get to end with current set of gates open
+                    continue;
+                }
+                let end_quad = quadrant_table.get(end_id);
+                let mut min_cost: Option<SubProblemValue> = None;
+                for sub_end_id in subset_mask_minus_end_id.iter() {
+                    //println!("{:?} end {} via {}", subset_mask, end_id, sub_end_id);
+                    let sub_problem = SubProblem {
+                        subset_mask: subset_mask_minus_end_id,
+                        end_id: sub_end_id,
+                    };
+                    let &sub_cost: &SubProblemValue = match cache.get(&sub_problem) {
+                        Some(sub_cost) => sub_cost,
+                        None => continue,
+                    };
+                    let sub_end_id_in_this_quadrant =
+                        sub_cost.end_id_by_quadrant[end_quad as usize].unwrap_or(num_keys);
+                    let sub_end_to_end_pair_info =
+                        pair_table.get(sub_end_id_in_this_quadrant, end_id).unwrap();
+                    if !sub_end_to_end_pair_info
+                        .gates
+                        .is_subset_of(subset_mask_minus_end_id)
+                    {
+                        continue;
+                    }
+                    let cost = {
+                        let mut cost = sub_cost;
+                        cost.cost += sub_end_to_end_pair_info.cost;
+                        cost.end_id_by_quadrant[end_quad as usize] = Some(end_id);
+                        cost
+                    };
+                    min_cost = Some(if let Some(min_cost) = min_cost {
+                        if cost.cost < min_cost.cost {
+                            cost
+                        } else {
+                            min_cost
+                        }
+                    } else {
+                        cost
+                    });
+                }
+                let min_cost = if let Some(min_cost) = min_cost {
+                    min_cost
+                } else {
+                    if subset_mask_minus_end_id.is_empty() {
+                        SubProblemValue {
+                            cost: start_to_end_pair_info.cost,
+                            end_id_by_quadrant: {
+                                let mut end_id_by_quadrant = [None, None, None, None];
+                                end_id_by_quadrant[end_quad as usize] = Some(end_id);
+                                end_id_by_quadrant
+                            },
+                        }
+                    } else {
+                        continue;
+                    }
+                };
+                let sub_problem = SubProblem {
+                    subset_mask,
+                    end_id,
+                };
+                cache.insert(sub_problem, min_cost);
+            }
+        });
+    }
+    //println!("{:#?}", cache);
+    let min = cache
+        .iter()
+        .filter(|(k, _)| k.subset_mask.mask == ((1 << max_subset_size) - 1))
+        .map(|(_, v)| v.cost)
+        .min()
+        .unwrap();
+    println!("{}", min);
+}
+
+fn main() {
+    let mut input_string = String::new();
+    std::io::stdin().read_to_string(&mut input_string).unwrap();
+    let grid = Grid::from_str(&input_string);
+    let pair_table = grid.pair_table();
+    run(grid.num_keys, &pair_table);
+}
